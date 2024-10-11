@@ -53,7 +53,7 @@ updates and supports synthetic boundary entries to maintain consistent results.
 require Exporter;
 
 our @ISA = qw(Exporter);
-our($VERSION)='1.00';
+our($VERSION)='1.01';
 our($UntarError) = '';
 
 our %EXPORT_TAGS = ( 'all' => [ qw( ) ] );
@@ -108,7 +108,7 @@ sub add {
   my ($self, $timestamp, $value) = @_;
 
   die "series key (e.g. timestamp) and value must be defined" unless defined $timestamp && defined $value;
-  die "duplicated $timestamp" if @{ $self->{data} } && $self->{data}[-1]==$timestamp;
+  die "duplicated $timestamp" if @{ $self->{data} } && $self->{data}[-1]{timestamp}==$timestamp;
 
   my $largest_window = $self->{window_sizes}[-1];
   my $window_start   = $timestamp - $largest_window;
@@ -143,6 +143,7 @@ sub add {
   # Remove (both de-accumulate, as well as physically remove from the start of the array) data points outside the largest window size
   my $last_removed_point;
   my $removed_count = 0;  # Keep track of the number of removed points
+
   while (@{ $self->{data} } && $self->{data}[0]{timestamp} < $window_start) {
     $last_removed_point = shift @{ $self->{data} };
     $self->_remove_point($last_removed_point, $largest_window);
