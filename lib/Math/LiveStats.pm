@@ -45,14 +45,15 @@ Math::LiveStats - Pure perl module to make mean, standard deviation, vwap, and p
 
 =head1 DESCRIPTION
 
-Math::LiveStats provides live statistical calculations (mean, standard deviation, p-value)
-over multiple window sizes for streaming data. It uses West's algorithm for efficient
-updates and supports synthetic boundary entries to maintain consistent results.
+Math::LiveStats provides live statistical calculations (mean, standard deviation, p-value,
+volume-weighted-average-price and stddev vwap) over multiple window sizes for streaming 
+data. It uses West's algorithm for efficient updates and supports synthetic boundary 
+entries to maintain consistent results.
 
-Note that, while it has upto 1 synthetic entry per windowsize (when old data shuffles out
-of the array, a linearly-interpo0lated synthetic entry is added or assumed), the mean, vwap
-and deviations are computed only over the data that exists inside the window.  One or more
-entries may be missing (not including the oldest, which will be syntietic in that case).
+Stats are computed based on data that exists inside the given window size, plus possibly
+one (at most) synthetic entry: when old data shuffles out of the window, if there's no
+data exactly on the oldest boundary of the window, one synthetic value is assumed to be
+there, which is linearly-interpolated from the entries that appeared logically either side.
 
 =head1 METHODS
 
@@ -62,7 +63,7 @@ entries may be missing (not including the oldest, which will be syntietic in tha
 require Exporter;
 
 our @ISA = qw(Exporter);
-our($VERSION)='1.01';
+our($VERSION)='1.02';
 our($UntarError) = '';
 
 our %EXPORT_TAGS = ( 'all' => [ qw( ) ] );
@@ -528,6 +529,13 @@ __END__
 =head2 EXPORT
 
 None by default.
+
+
+=head2 Source/Bug-Reports
+
+Please report any bugs or feature requests on the GitHub repository at:
+
+L<https://github.com/gitcnd/Math-LiveStats>
 
 
 =head1 AUTHORS

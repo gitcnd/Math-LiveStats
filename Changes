@@ -8,3 +8,6 @@ Revision history for Perl extension Math::LiveStats
 	- Added vwap and vwapdev features
 	- more tests
 
+1.02  Sun Oct 13 01:18:55 UTC 2024
+	- Update documentation
+
