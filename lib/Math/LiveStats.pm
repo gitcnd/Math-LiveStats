@@ -7,7 +7,7 @@ use warnings;
 
 =head1 NAME
 
-Math::LiveStats - Pure perl module to make mean, standard deviation, and p-values available for given window sizes in streaming data
+Math::LiveStats - Pure perl module to make mean, standard deviation, vwap, and p-values available for one or more window sizes in streaming data
 
 =head1 SYNOPSIS
 
@@ -19,14 +19,16 @@ Math::LiveStats - Pure perl module to make mean, standard deviation, and p-value
     # Create a new Math::LiveStats object with window sizes of 60 and 300 seconds
     my $stats = Math::LiveStats->new(60, 300); # doesn't have to be "time" or "seconds" - could be any series base you want
   
-    # Add time-series data points (timestamp, value)
-    $stats->add(1000, 50);
-    $stats->add(1060, 55);
-    $stats->add(1120, 53);
+    # Add time-series data points (timestamp, value, volume) # use volume=0 if you don't use/need vwap
+    $stats->add(1000, 50, 5);
+    $stats->add(1060, 55, 10);
+    $stats->add(1120, 53, 5);
   
     # Get mean and standard deviation for a window size
     my $mean_60 = $stats->mean(60);
-    my $stddev_60 = $stats->stddev(60);
+    my $stddev_60 = $stats->stddev(60); # of the mean
+    my $vwap_60 = $stats->vwap(60);
+    my $vwapdev_60 = $stats->vwapdev(60); # stddev of the vwap
   
     # Get the p-value for a window size
     my $pvalue_60 = $stats->pvalue(60);
@@ -37,6 +39,9 @@ Math::LiveStats - Pure perl module to make mean, standard deviation, and p-value
     # Recalculate statistics to reduce accumulated errors
     $stats->recalc(60);
 
+=head1 CLI one-liner example
+
+    cat data | perl -MMath::LiveStats -ne 'BEGIN{$s=Math::LiveStats->new(20);} chomp;($t,$p,$v)=split(/,/); $s->add($t,$p,$v); print "$t,$p,$v,$s->n(20),$s->mean(20),$s->stddev(20),$s->vwap(20),$s->vwapdev(20)\n"'
 
 =head1 DESCRIPTION
 
@@ -44,6 +49,10 @@ Math::LiveStats provides live statistical calculations (mean, standard deviation
 over multiple window sizes for streaming data. It uses West's algorithm for efficient
 updates and supports synthetic boundary entries to maintain consistent results.
 
+Note that, while it has upto 1 synthetic entry per windowsize (when old data shuffles out
+of the array, a linearly-interpo0lated synthetic entry is added or assumed), the mean, vwap
+and deviations are computed only over the data that exists inside the window.  One or more
+entries may be missing (not including the oldest, which will be syntietic in that case).
 
 =head1 METHODS
 
@@ -89,6 +98,10 @@ sub new {
       n         => 0,
       mean      => 0,
       M2        => 0,
+      cpv       => 0, # Cumulative_Price_Volume
+      cv        => 0, # Cumulative_Volume
+      vM2       => 0, # M2 of the vwap
+      vmean	=> 0, # for vwapdev
       synthetic => undef,  # To store synthetic entry if needed
       start_index => 0,
     };
@@ -98,14 +111,14 @@ sub new {
 } # new
 
 
-=head2 add($timestamp, $value)
+=head2 add($timestamp, $value [,$volume])
 
 Adds a new data point to the time-series and updates statistics.
 
 =cut
 
 sub add {
-  my ($self, $timestamp, $value) = @_;
+  my ($self, $timestamp, $value, $volume) = @_;
 
   die "series key (e.g. timestamp) and value must be defined" unless defined $timestamp && defined $value;
   die "duplicated $timestamp" if @{ $self->{data} } && $self->{data}[-1]{timestamp}==$timestamp;
@@ -113,13 +126,14 @@ sub add {
   my $largest_window = $self->{window_sizes}[-1];
   my $window_start   = $timestamp - $largest_window;
   my $inserted_synthetic=0;
+  $volume=0 unless($volume);
 
 
   # Actually append the new data point to the end of our array
-  push @{ $self->{data} }, { timestamp => $timestamp, value => $value };
+  push @{ $self->{data} }, { timestamp => $timestamp, value => $value, volume => $volume };
 
   # Update stats for our largest_window with the new data point
-  $self->_add_point({ timestamp => $timestamp, value => $value }, $largest_window);
+  $self->_add_point({ timestamp => $timestamp, value => $value, volume => $volume}, $largest_window);
 
   # de-accumulate now-old data from non-largest window sizes
   foreach my $window (@{ $self->{window_sizes} }[0 .. $#{ $self->{window_sizes} } - 1]) { # do all, except the last (i.e. not the $largest_window)
@@ -160,20 +174,22 @@ sub add {
     my $synthetic_timestamp = $window_start;
 
     # Determine value for synthetic point
-    my $synthetic_value;
+    my($synthetic_value, $synthetic_volume);
 
     if ($last_removed_point) {
       # Interpolate between last_removed_point and oldest_point
-      $synthetic_value = $self->_interpolate( $last_removed_point, $oldest_point, $synthetic_timestamp );
+      ($synthetic_value, $synthetic_volume) = $self->_interpolate( $last_removed_point, $oldest_point, $synthetic_timestamp );
     } else {
       # Initial add, use value of the oldest_point
       $synthetic_value = $oldest_point->{value};
+      $synthetic_volume = $oldest_point->{volume};
     }
 
     # Create synthetic point
     my $synthetic_point = {
       timestamp => $synthetic_timestamp,
       value   => $synthetic_value,
+      volume   => $synthetic_volume,
       # is this needed? synthetic => 1,  # Mark as synthetic
     };
 
@@ -182,7 +198,7 @@ sub add {
     $removed_count--;
 
     # Update stats with the synthetic point
-    $self->_add_point({ timestamp => $synthetic_timestamp, value => $synthetic_value }, $largest_window);
+    $self->_add_point($synthetic_point, $largest_window);
   }
 
 
@@ -192,7 +208,7 @@ sub add {
     my $stats = $self->{stats}{$window};
 
     # Update stats with the new data point for this window
-    $self->_add_point({ timestamp => $timestamp, value => $value }, $window);
+    $self->_add_point({ timestamp => $timestamp, value => $value, volume => $volume }, $window);
 
     if($removed_count!=0) { # might be negative if we already physically inserted a synthetic point
       # Decrement start_index by the number of removed elements
@@ -211,7 +227,7 @@ sub add {
     if (!$oldest_in_window || $oldest_in_window->{timestamp} > $window_start) { # needs synthetic
       # Need to insert synthetic point
       my $synthetic_timestamp = $window_start;
-      my $synthetic_value;
+      my($synthetic_value, $synthetic_volume);
 
       my $before_index = $stats->{start_index} - 1;
       my $before = $before_index >= 0 ? $self->{data}[ $before_index ] : undef;
@@ -219,19 +235,22 @@ sub add {
 
       if ($before && $after) {
         # Interpolate between before and after
-        $synthetic_value = $self->_interpolate($before, $after, $synthetic_timestamp);
+        ($synthetic_value, $synthetic_volume) = $self->_interpolate($before, $after, $synthetic_timestamp);
       } elsif ($after) {
         # Use the value of the after point
         $synthetic_value = $after->{value};
+        $synthetic_volume = $after->{volume};
       } else {
         # Use the current value (since there's no data in window)
         $synthetic_value = $value;
+        $synthetic_volume = $volume;
       }
 
       # Create synthetic point
       my $synthetic_point = {
         timestamp => $synthetic_timestamp,
         value     => $synthetic_value,
+        volume   => $synthetic_volume,
         # not used: synthetic => 1,
       };
 
@@ -263,7 +282,7 @@ sub mean {
 
 =head2 stddev($window_size)
 
-Returns the standard deviation for the specified window size.
+Returns the standard deviation of the values for the specified window size.
 
 =cut
 
@@ -341,6 +360,39 @@ sub n {
   return $self->{stats}{$window}{n};
 }
 
+
+=head2 vwap($window_size)
+
+Returns the volume-weighted average price for the specified window size.
+
+=cut
+
+sub vwap {
+  my ($self, $window) = @_;
+  die "Window size must be specified" unless defined $window;
+  die "Invalid window size" unless exists $self->{stats}{$window};
+
+  return $self->{stats}{$window}{cv} ? $self->{stats}{$window}{cpv}/$self->{stats}{$window}{cv} : undef;
+} # vwap
+
+
+=head2 vwapdev($window_size)
+
+Returns the standard deviation of the vwap for the specified window size.
+
+=cut
+
+sub vwapdev {
+  my ($self, $window) = @_;
+  die "Window size must be specified" unless defined $window;
+  die "Invalid window size" unless exists $self->{stats}{$window};
+
+  my $cv = $self->{stats}{$window}{cv};
+  my $vM2 = $self->{stats}{$window}{vM2};
+  my $variance = $cv > 0 ? $vM2 / $cv : 0;
+  return $variance < 0 ? 0 : sqrt($variance);
+} # vwapdev
+
 =head2 recalc($window_size)
 
 Recalculates the running statistics for the given window to reduce accumulated numerical errors.
@@ -354,9 +406,13 @@ sub recalc {
 
   # Reset stats for given window size
   my $stats = $self->{stats}{$window};
-  $stats->{n}           = 0;
-  $stats->{mean}        = 0;
-  $stats->{M2}          = 0;
+  $stats->{n}		= 0;
+  $stats->{mean}	= 0;
+  $stats->{M2}		= 0;
+  $stats->{cpv}		= 0;
+  $stats->{cv}		= 0;
+  $stats->{vM2}		= 0;
+  $stats->{vmean}	= 0;
   # Retain existing synthetic entry if any
   # $stats->{synthetic} remains unchanged
   # Retain existing start_index so we can avoid having to search for the starting data
@@ -383,13 +439,30 @@ sub _add_point {
   my ($self, $point, $window) = @_;
 
   my $stats = $self->{stats}{$window};
-
+  my $w = $point->{volume} ? $point->{volume} : ($stats->{n} ? $stats->{cv} / $stats->{n} : 0);
   $stats->{n}++;
+
+  # Update mean and M2 as before
   my $delta = $point->{value} - $stats->{mean};
   $stats->{mean} += $delta / $stats->{n};
   my $delta2 = $point->{value} - $stats->{mean};
   $stats->{M2} += $delta * $delta2;
-  #print("added w$window ($point->{timestamp},$point->{value}) n=$stats->{n}\n");
+
+  # Update cumulative price*volume and cumulative volume
+  $stats->{cpv} += $point->{value} * $w;
+  $stats->{cv} += $w;
+
+  # Update weighted mean (vmean) and weighted M2 (vM2)
+  my $sumw_prev = $stats->{cv} - $w;
+  if ($sumw_prev > 0) {
+    my $delta_w = $point->{value} - $stats->{vmean};
+    $stats->{vmean} += ($w / $stats->{cv}) * $delta_w;
+    $stats->{vM2} += $w * $delta_w * ($point->{value} - $stats->{vmean});
+  } else {
+    # First data point
+    $stats->{vmean} = $point->{value};
+    $stats->{vM2} = 0;
+  }
 } # _add_point
 
 
@@ -398,20 +471,35 @@ sub _remove_point {
   my ($self, $point, $window) = @_;
 
   my $stats = $self->{stats}{$window};
-  #return if $stats->{n} == 0;
-
-  #print("removed w$window ($point->{timestamp},$point->{value})");
+  my $w = $point->{volume} ? $point->{volume} : ($stats->{n} ? $stats->{cv} / $stats->{n} : 0);
   $stats->{n}--;
+  $stats->{n} = 0 if $stats->{n} < 0;
+
+  # Update mean and M2
   my $delta = $point->{value} - $stats->{mean};
   $stats->{mean} -= $delta / ($stats->{n} || 1);
   my $delta2 = $point->{value} - $stats->{mean};
   $stats->{M2} -= $delta * $delta2;
+  $stats->{M2} = 0 if $stats->{M2} < 0; # Ensure M2 is not negative due to floating-point errors
 
-  # Ensure M2 is not negative due to floating-point errors
-  #warn "hmm $stats->{M2}"  if $stats->{M2} < 0;
-  $stats->{M2} = 0 if $stats->{M2} < 0;
-  #print("new n=$stats->{n}\n");
-}
+  # Update cumulative price*volume and cumulative volume
+  $stats->{cpv} -= $point->{value} * $w;
+  $stats->{cv} -= $w;
+  $stats->{cv} = 0 if $stats->{cv} < 0;
+
+  # Update weighted mean (vmean) and weighted M2 (vM2)
+  my $sumw_prev = $stats->{cv} + $w;
+  if ($stats->{cv} > 0) {
+    my $delta_w = $point->{value} - $stats->{vmean};
+    $stats->{vmean} -= ($w / $stats->{cv}) * $delta_w;
+    $stats->{vM2} -= $w * $delta_w * ($point->{value} - $stats->{vmean});
+    $stats->{vM2} = 0 if $stats->{vM2} < 0;
+  } else {
+    # No data points left
+    $stats->{vmean} = 0;
+    $stats->{vM2} = 0;
+  }
+} # _remove_point
 
 
 # Internal method to interpolate synthetic value
@@ -420,12 +508,15 @@ sub _interpolate {
 
   my $t0 = $before->{timestamp};
   my $t1 = $after->{timestamp};
-  my $v0 = $before->{value};
-  my $v1 = $after->{value};
+  my $p0 = $before->{value};
+  my $p1 = $after->{value};
+  my $v0 = $before->{volume};
+  my $v1 = $after->{volume};
 
-  my $slope = ($v1 - $v0) / ($t1 - $t0);
-  return $v0 + $slope * ($time - $t0);
-}
+  my $slopep = ($p1 - $p0) / ($t1 - $t0);
+  my $slopev = ($v1 - $v0) / ($t1 - $t0);
+  return ($p0 + $slopep * ($time - $t0), $v0 + $slopev * ($time - $t0));
+} # _interpolate
 
 
 
