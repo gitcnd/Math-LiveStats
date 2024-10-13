@@ -33,7 +33,7 @@ Math::LiveStats - Pure perl module to make mean, standard deviation, vwap, and p
 
 # CLI one-liner example
 
-    cat data | perl -MMath::LiveStats -ne 'BEGIN{$s=Math::LiveStats->new(20);} chomp;($t,$p,$v)=split(/,/); $s->add($t,$p,$v); print "$t,$p,$v,$s->n(20),$s->mean(20),$s->stddev(20),$s->vwap(20),$s->vwapdev(20)\n"'
+    cat data | perl -MMath::LiveStats -ne 'BEGIN{$s=Math::LiveStats->new(20);} chomp;($t,$p,$v)=split(/,/); $s->add($t,$p,$v); print "$t,$p,$v,",$s->n(20),",",$s->mean(20),",",$s->stddev(20),",",$s->vwap(20),",",$s->vwapdev(20),"\n"'
 
 # DESCRIPTION
 
